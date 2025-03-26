@@ -10,6 +10,7 @@ pub mod modes;
 #[derive(Debug)]
 pub struct Config {
     model: Box<dyn git_analysis::GitAnalyzer>,
+    repo_path: String,
 }
 
 #[derive(Debug)]
@@ -19,8 +20,25 @@ pub struct FileAnalysis {
 }
 
 impl Config {
-    pub fn new(model: Box<dyn git_analysis::GitAnalyzer>) -> Self {
-        Self { model }
+    pub fn new(model: Box<dyn git_analysis::GitAnalyzer>, repo_path: Option<String>) -> Self {
+        Self { 
+            model,
+            repo_path: repo_path.unwrap_or_else(|| ".".to_string())
+        }
+    }
+
+    pub fn with_new_model(self, model: Box<dyn git_analysis::GitAnalyzer>) -> Self {
+        Self {
+            model,
+            repo_path: self.repo_path,
+        }
+    }
+
+    pub fn with_new_repo(self, repo_path: String) -> Self {
+        Self {
+            model: self.model,
+            repo_path,
+        }
     }
 
     pub async fn generate_commit_message(&self, diff: &str) -> Result<String, Box<dyn Error>> {
@@ -52,21 +70,49 @@ impl Config {
     }
 }
 
-pub async fn run() -> Result<(), Box<dyn Error>> {
-    let repo = Repository::open(".")?;
-    
-    let providers = providers::get_available_providers();
+pub async fn run(_repo_path: Option<String>) -> Result<(), Box<dyn Error>> {
+    let repo_path = loop {
+        let path = ui::get_repository_path(".")?;
+        match Repository::open(&path) {
+            Ok(_) => break path,
+            Err(_) => println!("Invalid git repository path. Please try again."),
+        }
+    };
 
-    let selected_idx = providers::select_provider(&providers)?;
-    let config = Config::new(git_analysis::wrap_provider(providers.into_iter().nth(selected_idx).unwrap()));
+    let mut config = {
+        let providers = providers::get_available_providers();
+        let selected_idx = providers::select_provider(&providers)?;
+        Config::new(git_analysis::wrap_provider(providers.into_iter().nth(selected_idx).unwrap()), Some(repo_path))
+    };
+    
+    let mut repo = Repository::open(&config.repo_path)?;
 
     loop {
         let mode = ui::select_mode().await?;
         mode.execute(&config, &repo).await?;
 
-        let options = ["✨ Do something else", "❌ Exit"];
-        if ui::show_selection_menu("What would you like to do next?", &options, 0)? == 1 {
-            break;
+        let options = ["✨ Do something else", "🤖 Switch AI model", "📁 Switch repository", "❌ Exit"];
+        match ui::show_selection_menu("What would you like to do next?", &options, 0)? {
+            0 => (),  // Continue loop
+            1 => {
+                let providers = providers::get_available_providers();
+                let selected_idx = providers::select_provider(&providers)?;
+                config = config.with_new_model(git_analysis::wrap_provider(providers.into_iter().nth(selected_idx).unwrap()));
+            }
+            2 => {
+                let new_path = loop {
+                    let path = ui::get_repository_path(".")?;
+                    match Repository::open(&path) {
+                        Ok(new_repo) => {
+                            repo = new_repo;
+                            break path;
+                        }
+                        Err(_) => println!("Invalid git repository path. Please try again."),
+                    }
+                };
+                config = config.with_new_repo(new_path);
+            }
+            _ => break,
         }
         println!("\x1B[2J\x1B[1;1H"); // Clear screen
     }
